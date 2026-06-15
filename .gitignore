@@ -11,5 +11,3 @@ wheels/
 
 # Datasets, trained models and generated figures
 data/
-checkpoints/
-outputs/
