@@ -368,4 +368,313 @@ samples = sample_image(px)                              # x' ~ p(X | z)
     \label{fig:prior}
 \end{figure}
 
+%% ===========================================================================
+\section{Task 2 --- Choice of Conditional Data Distributions}
+%% ===========================================================================
+
+\section*{Task 2a --- Reflection on the Gaussian choice}
+\addcontentsline{toc}{section}{Task 2a --- Reflection on the Gaussian choice}
+
+The Gaussian likelihood is \emph{not fully appropriate} for MNIST for two reasons.
+First, the Gaussian distribution is supported on all of $\mathbb{R}$, whereas pixel
+values are bounded to $[0, 1]$; the decoder must therefore impose an \emph{ad hoc}
+constraint (sigmoid on the mean, clamping of the predicted variance) that is not
+required by the model itself.  Second, MNIST pixels are highly bimodal: they are
+concentrated near $0$ (background) and $1$ (foreground), not spread over $[0, 1]$
+like a Gaussian would predict.  Distributions that are either natively bounded (Beta)
+or discrete (Bernoulli, Categorical) are a better fit for this data.
+
+\section*{Task 2b --- Beta Distributions}
+\addcontentsline{toc}{section}{Task 2b --- Beta Distributions}
+
+\paragraph{Conditional log-likelihood.}
+We replace the Gaussian conditional with a product of independent Beta distributions,
+\[
+p(\bX \mid \bz)
+= \prod_{d=1}^{D} \mathrm{Beta}\!\big(X_d \mid \alpha_d(\bz),\, \beta_d(\bz)\big),
+\]
+where $\alpha_d(\bz)>0$ and $\beta_d(\bz)>0$ are the outputs of the decoder.
+The log-likelihood of a single data-point $\bx$ given $\bz$ is
+\begin{align}
+\log p(\bx \mid \bz)
+&= \sum_{d=1}^{D} \log \mathrm{Beta}\!\big(x_d \mid \alpha_d(\bz), \beta_d(\bz)\big) \nonumber \\
+&= \sum_{d=1}^{D} \Big[
+    (\alpha_d(\bz)-1)\log x_d
+    + (\beta_d(\bz)-1)\log(1-x_d)
+    - \log B\!\big(\alpha_d(\bz), \beta_d(\bz)\big)
+   \Big],
+\end{align}
+where $\log B(\alpha,\beta) = \log\Gamma(\alpha) + \log\Gamma(\beta) - \log\Gamma(\alpha+\beta)$
+is evaluated with \texttt{torch.lgamma} for numerical stability.  Because the Beta
+distribution is only defined for $x_d \in (0, 1)$, we clamp pixel values to
+$(\varepsilon, 1-\varepsilon)$ with $\varepsilon = 10^{-6}$ before computing
+the log.
+
+\paragraph{Decoder changes.}
+The upsample path is identical to Task~1. The two output heads (\texttt{head\_mean},
+\texttt{head\_logvar}) are replaced by \texttt{head\_alpha} and \texttt{head\_beta},
+each followed by a \texttt{softplus} activation plus a small floor $10^{-6}$ to
+guarantee strict positivity:
+
+\begin{lstlisting}[caption={Beta decoder output heads (\texttt{vae/model\_beta.py}).}]
+self.head_alpha = nn.Conv2d(32, 1, kernel_size=1)
+self.head_beta  = nn.Conv2d(32, 1, kernel_size=1)
+
+def forward(self, z):
+    h = self.upsample(self.project(z).view(-1, 128, 4, 4))
+    alpha = F.softplus(self.head_alpha(h)) + 1e-6   # alpha > 0
+    beta  = F.softplus(self.head_beta(h))  + 1e-6   # beta  > 0
+    return BetaParams(alpha=alpha, beta=beta)
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Beta log-likelihood (\texttt{vae/elbo.py}).}]
+def beta_log_likelihood(x, px, eps=1e-6):
+    x_safe = x.clamp(eps, 1.0 - eps)
+    log_prob = ((px.alpha - 1.0) * torch.log(x_safe)
+                + (px.beta - 1.0) * torch.log(1.0 - x_safe))
+    log_beta_fn = (torch.lgamma(px.alpha) + torch.lgamma(px.beta)
+                   - torch.lgamma(px.alpha + px.beta))
+    return (log_prob - log_beta_fn).flatten(start_dim=1).sum(dim=1)
+\end{lstlisting}
+
+The encoder is unchanged.  For visualisation we use the posterior mean
+$\mathbb{E}[\mathrm{Beta}(\alpha,\beta)] = \alpha/(\alpha+\beta)$, which gives
+sharper images than sampling from the Beta distribution.
+
+\paragraph{Training.}
+We used the same hyperparameters as Task~1 (Adam, $\text{lr}=10^{-3}$, batch 128,
+patience 5). Training stopped at epoch~51 (best validation ELBO $\mathbf{7585.3}$
+at epoch~46). Note that the Beta ELBO is on a different scale than the Gaussian ELBO
+from Task~1 because the Beta log-likelihood also contains the normalisation term
+$-\log B(\alpha,\beta)$.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\textwidth]{outputs/task2b_elbo.png}
+    \caption{Task 2b -- ELBO (per image) for the Beta VAE on the training and
+    validation splits as a function of the training epoch.}
+    \label{fig:beta_elbo}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{outputs/task2b_reconstructions.png}
+        \caption{Reconstructions (posterior mean $\alpha/(\alpha+\beta)$).}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{outputs/task2b_prior_samples.png}
+        \caption{Prior samples.}
+    \end{subfigure}
+    \caption{Task 2b -- Beta VAE: test-image reconstructions (left) and images
+    sampled from $p(\bZ)$ (right). In both cases we display the posterior mean
+    $\alpha_d(\bz)/(\alpha_d(\bz)+\beta_d(\bz))$ rather than a stochastic sample.}
+    \label{fig:beta_recon}
+\end{figure}
+
+\section*{Task 2c --- Categorical Distributions}
+\addcontentsline{toc}{section}{Task 2c --- Categorical Distributions}
+
+\paragraph{Discretisation.}
+We discretise each pixel into $k=4$ equal-width bins:
+\begin{center}
+\begin{tabular}{lll}
+\hline
+Bin & Range & Midpoint \\
+\hline
+0 & $[0.00, 0.25)$ & $0.125$ \\
+1 & $[0.25, 0.50)$ & $0.375$ \\
+2 & $[0.50, 0.75)$ & $0.625$ \\
+3 & $[0.75, 1.00]$ & $0.875$ \\
+\hline
+\end{tabular}
+\end{center}
+We chose $k=4$ because MNIST pixels are bimodal (mostly near 0 or 1): four bins
+capture this bimodality while keeping the output head compact.  Using more bins
+(e.g.\ 256) would require a much larger output head and offer diminishing returns,
+since intermediate gray values are rare.
+
+\paragraph{Conditional log-likelihood.}
+Let $\mathrm{bin}(x_d) \in \{0,\ldots,k-1\}$ be the bin index of pixel $x_d$.
+The conditional log-likelihood is
+\[
+\log p(\bx \mid \bz)
+= \sum_{d=1}^{D} \log \mathrm{Cat}\!\big(\mathrm{bin}(x_d) \mid \bm{\pi}_d(\bz)\big)
+= \sum_{d=1}^{D} \log \pi_{d,\,\mathrm{bin}(x_d)}(\bz),
+\]
+where $\bm{\pi}_d(\bz) = \mathrm{softmax}(\mathrm{logits}_d(\bz)) \in \Delta^{k-1}$
+is the categorical probability vector for pixel $d$.
+
+\paragraph{Decoder changes.}
+The upsample path is identical to Task~1. The two 1-channel heads are replaced by a
+single $k$-channel head whose outputs are raw logits:
+
+\begin{lstlisting}[caption={Categorical decoder (\texttt{vae/model\_categorical.py}).}]
+self.head_logits = nn.Conv2d(32, k, kernel_size=1)  # k=4 channels
+
+def forward(self, z):
+    h = self.upsample(self.project(z).view(-1, 128, 4, 4))
+    return self.head_logits(h)   # raw logits, shape (B, k, H, W)
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Categorical log-likelihood (\texttt{vae/elbo.py}).}]
+def cat_log_likelihood(x, logits, k):
+    x_bins = (x * k).long().clamp(0, k - 1).squeeze(1)  # (B, H, W)
+    log_probs = F.log_softmax(logits, dim=1)             # (B, k, H, W)
+    nll = F.nll_loss(log_probs, x_bins, reduction="none")
+    return -nll.flatten(start_dim=1).sum(dim=1)
+\end{lstlisting}
+
+For reconstruction and sampling we translate bin probabilities back to pixel
+values using the \emph{expected value}: $\hat{x}_d = \sum_{i=0}^{k-1} \pi_{d,i} \cdot m_i$,
+where $m_i = (i + 0.5)/k$ is the midpoint of bin $i$.
+
+\paragraph{Training.}
+Training stopped at epoch~44 (best validation ELBO $\mathbf{-146.1}$ at epoch~39).
+The ELBO values are negative and of a different order of magnitude than
+the other models because the log-likelihood is computed over discrete bins rather
+than continuous densities.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\textwidth]{outputs/task2c_elbo.png}
+    \caption{Task 2c -- ELBO (per image) for the Categorical VAE on the training and
+    validation splits as a function of the training epoch.}
+    \label{fig:cat_elbo}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{outputs/task2c_reconstructions.png}
+        \caption{Reconstructions (expected pixel value).}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{outputs/task2c_prior_samples.png}
+        \caption{Prior samples.}
+    \end{subfigure}
+    \caption{Task 2c -- Categorical VAE: test-image reconstructions (left) and images
+    sampled from $p(\bZ)$ (right). Pixel values are computed as the weighted sum of
+    bin midpoints under the predicted categorical distribution.}
+    \label{fig:cat_recon}
+\end{figure}
+
+\section*{Task 2d --- Bernoulli Distributions}
+\addcontentsline{toc}{section}{Task 2d --- Bernoulli Distributions}
+
+\paragraph{Model and objective.}
+The decoder now produces a Bernoulli probability $\pi_d(\bz) \in (0,1)$ per pixel.
+Training maximises
+\[
+-H\!\big(p(\bB \mid \bx),\, p(\bB \mid \bz)\big) - \KL\!\big(q(\bZ \mid \bx)\,\|\,p(\bZ)\big),
+\]
+where the \emph{negative cross-entropy} between the two Bernoulli distributions
+$p(\bB \mid \bx) = \prod_d \mathrm{Bern}(B_d \mid x_d)$ and
+$p(\bB \mid \bz) = \prod_d \mathrm{Bern}(B_d \mid \pi_d(\bz))$ is
+\begin{equation}
+-H\!\big(p(\bB \mid \bx),\, p(\bB \mid \bz)\big)
+= \sum_{d=1}^{D} \Big[ x_d \log \pi_d(\bz) + (1 - x_d) \log\!\big(1 - \pi_d(\bz)\big) \Big].
+\end{equation}
+This is exactly the negative binary cross-entropy (BCE), implemented with
+\texttt{binary\_cross\_entropy\_with\_logits} for numerical stability.
+
+\paragraph{Decoder changes.}
+The decoder produces a single raw logit per pixel (no activation); the sigmoid
+$\pi_d = \sigma(\mathrm{logit}_d)$ is applied inside the loss function.
+
+\begin{lstlisting}[caption={Bernoulli decoder (\texttt{vae/model\_bernoulli.py}).}]
+self.head_logits = nn.Conv2d(32, 1, kernel_size=1)  # raw logit per pixel
+
+def forward(self, z):
+    h = self.upsample(self.project(z).view(-1, 128, 4, 4))
+    return self.head_logits(h)   # shape (B, 1, H, W)
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Bernoulli (cross-entropy) objective (\texttt{vae/elbo.py}).}]
+def bernoulli_neg_cross_entropy(x, logits):
+    neg_ce = -F.binary_cross_entropy_with_logits(
+        logits, x, reduction="none")
+    return neg_ce.flatten(start_dim=1).sum(dim=1)
+\end{lstlisting}
+
+For reconstruction and sampling we use the posterior mean
+$\mathbb{E}[B_d \mid \bz] = \pi_d(\bz) = \sigma(\mathrm{logit}_d(\bz))$ rather than
+sampling, which produces sharper, less noisy images (as suggested in the hint).
+
+\paragraph{Training.}
+Training stopped at epoch~68 (best validation objective $\mathbf{-95.1}$ at
+epoch~63). The objective is measured in nats and reflects the cross-entropy between
+the data distribution and the model, not a conventional log-likelihood density.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\textwidth]{outputs/task2d_elbo.png}
+    \caption{Task 2d -- Modified ELBO (per image) for the Bernoulli VAE on the
+    training and validation splits as a function of the training epoch.}
+    \label{fig:bern_elbo}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{outputs/task2d_reconstructions.png}
+        \caption{Reconstructions (posterior mean $\pi_d(\bz)$).}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{outputs/task2d_prior_samples.png}
+        \caption{Prior samples.}
+    \end{subfigure}
+    \caption{Task 2d -- Bernoulli VAE: test-image reconstructions (left) and images
+    sampled from $p(\bZ)$ (right). We display $\pi_d(\bz) = \sigma(\mathrm{logit}_d(\bz))$
+    (the posterior mean) rather than binary samples.}
+    \label{fig:bern_recon}
+\end{figure}
+
+\section*{Task 2e --- Reflection on the best choice of distribution}
+\addcontentsline{toc}{section}{Task 2e --- Reflection on the best choice of distribution}
+
+Among the four distributions considered, we argue that the \textbf{Bernoulli} model
+provides the most \emph{practically} appropriate choice for MNIST, while the
+\textbf{Beta} is most \emph{theoretically} motivated.
+
+\paragraph{Bernoulli.}
+MNIST digits are nearly binary: the vast majority of pixels are either
+close to 0 (background) or close to 1 (foreground), with few intermediate values.
+The Bernoulli model matches this prior knowledge perfectly, and its cross-entropy
+objective is equivalent to maximising the probability of the correct binary
+``on/off'' interpretation of each pixel.  The resulting reconstructions
+(Figure~\ref{fig:bern_recon}) are visually crisp and faithful.
+
+\paragraph{Beta.}
+From a theoretical standpoint the Beta distribution is the natural choice: it
+is supported on $(0,1)$, its two shape parameters give it great flexibility
+(it can represent unimodal, bimodal and uniform shapes), and it explicitly
+treats pixel values as continuous probabilities in $[0,1]$.  In practice,
+however, the presence of the log-Beta normalisation term and the need to clamp
+pixel values away from the boundary add numerical complexity.
+
+\paragraph{Categorical.}
+The Categorical model is a flexible, parameter-free approximation to any
+distribution over $[0,1]$; it is not constrained to any particular shape.
+Its main disadvantage is that the choice of $k$ and the bin boundaries are
+hyper-parameters, and the discrete representation discards metric structure
+between adjacent bins.
+
+\paragraph{Gaussian.}
+Although computationally simple, the Gaussian likelihood is the least
+appropriate: its unbounded support is a structural mismatch with pixel
+data in $[0,1]$, and the model must resort to architectural constraints
+(sigmoid on the mean, clamped log-variance) that are not demanded by the data.
+
+\paragraph{Alternative: Logistic or Continuous Bernoulli.}
+A distribution not covered above that is arguably \emph{more} appropriate is the
+\textbf{Continuous Bernoulli} (Loaiza-Ganem \& Cunningham, 2019), which is defined
+exactly on $[0,1]$, has a single natural parameter $\lambda$, and is closely related
+to the Bernoulli model used here.  Unlike the standard Bernoulli cross-entropy
+objective, the Continuous Bernoulli adds a normalisation term that accounts for the
+fact that the data are continuous, leading to a proper probability density on $[0,1]$.
+
 \end{document}

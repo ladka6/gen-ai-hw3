@@ -17,13 +17,14 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
 from .data import MnistData
-from .elbo import elbo
+from .elbo import elbo, ElboTerms
 from .model import GaussianVAE
 
 
@@ -162,4 +163,113 @@ def train(
     # Restore the best parameters before returning.
     best_model = load_checkpoint(checkpoint_path, device)
     model.load_state_dict(best_model.state_dict())
+    return history
+
+
+# ---------------------------------------------------------------------------
+# Generic training loop -- works with any VAE and any ELBO function
+# (used by Task 2b, 2c, 2d)
+# ---------------------------------------------------------------------------
+
+ElboFn = Callable[[Tensor, object, object], ElboTerms]
+
+
+@torch.no_grad()
+def evaluate_generic(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    elbo_fn: ElboFn,
+) -> EvalResult:
+    """Average ELBO over a whole split for any model/ELBO combination."""
+    model.eval()
+    total_elbo = total_ll = total_kl = 0.0
+    total_count = 0
+    for x, _ in loader:
+        x = x.to(device)
+        q, _, decoder_out = model(x)
+        terms = elbo_fn(x, q, decoder_out)
+        batch = x.size(0)
+        total_elbo += terms.elbo.item() * batch
+        total_ll += terms.log_likelihood.item() * batch
+        total_kl += terms.kl.item() * batch
+        total_count += batch
+    return EvalResult(
+        elbo=total_elbo / total_count,
+        log_likelihood=total_ll / total_count,
+        kl=total_kl / total_count,
+    )
+
+
+def save_checkpoint_any(model: nn.Module, path: str | Path, **metadata) -> None:
+    """Save any nn.Module's state_dict plus optional metadata."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"state_dict": model.state_dict(), **metadata}, path)
+
+
+def train_generic(
+    model: nn.Module,
+    elbo_fn: ElboFn,
+    data: MnistData,
+    device: torch.device,
+    *,
+    learning_rate: float = 1e-3,
+    max_epochs: int = 100,
+    patience: int = 5,
+    checkpoint_path: str | Path = "checkpoints/task2.pt",
+) -> TrainHistory:
+    """Generic training loop for Task 2 models.
+
+    Identical stopping criterion to Task 1: early stopping on the validation
+    ELBO with `patience` epochs, saving the best checkpoint.
+    """
+    model.to(device)
+    optimiser = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    history = TrainHistory()
+
+    best_val_elbo = -float("inf")
+    epochs_without_improvement = 0
+
+    for epoch in range(1, max_epochs + 1):
+        model.train()
+        for x, _ in data.train_loader:
+            x = x.to(device)
+            optimiser.zero_grad()
+            q, _, decoder_out = model(x)
+            loss = -elbo_fn(x, q, decoder_out).elbo
+            loss.backward()
+            optimiser.step()
+
+        train_eval = evaluate_generic(model, data.train_loader, device, elbo_fn)
+        val_eval = evaluate_generic(model, data.val_loader, device, elbo_fn)
+
+        history.train_elbo.append(train_eval.elbo)
+        history.val_elbo.append(val_eval.elbo)
+        history.train_log_likelihood.append(train_eval.log_likelihood)
+        history.train_kl.append(train_eval.kl)
+        history.val_log_likelihood.append(val_eval.log_likelihood)
+        history.val_kl.append(val_eval.kl)
+
+        print(
+            f"epoch {epoch:3d} | "
+            f"train ELBO {train_eval.elbo:9.3f} | "
+            f"val ELBO {val_eval.elbo:9.3f}"
+        )
+
+        if val_eval.elbo > best_val_elbo:
+            best_val_elbo = val_eval.elbo
+            epochs_without_improvement = 0
+            save_checkpoint_any(model, checkpoint_path)
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= patience:
+                print(
+                    f"Early stopping at epoch {epoch}: no validation improvement "
+                    f"for {patience} epochs (best val ELBO {best_val_elbo:.3f})."
+                )
+                break
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    model.load_state_dict(checkpoint["state_dict"])
     return history
