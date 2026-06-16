@@ -819,4 +819,114 @@ encoded points stay on the data manifold.
     \label{fig:interp}
 \end{figure}
 
+\clearpage
+
+%% ===========================================================================
+\section{Task 4 --- Inference Without the Encoder}
+%% ===========================================================================
+
+For the final task we reuse our preferred model from Task~2, namely the
+Bernoulli VAE with $K=16$.  The model parameters are kept fixed throughout this
+section; only the parameters of a new variational distribution are optimised.
+This lets us approximate posterior inference even when we deliberately do not
+use the encoder network.
+
+\section*{Task 4a --- Reconstruction without the Encoder}
+\addcontentsline{toc}{section}{Task 4a --- Reconstruction without the Encoder}
+
+For a single test image $\bx$ we introduce a free diagonal Gaussian
+\[
+q(\bZ \mid \theta) =
+\mathcal{N}\!\left(\bZ \mid \bmu_\theta,
+\operatorname{diag}(\exp(\log \bsigma_\theta^2))\right),
+\]
+where $\theta = (\bmu_\theta,\log\bsigma_\theta^2)$ is initialised at the
+standard-normal prior values $(\mathbf{0},\mathbf{0})$.  We then optimise
+$\theta$ directly while keeping the VAE decoder fixed:
+\[
+\theta^\star
+= \arg\max_\theta
+\mathbb{E}_{q(\bZ\mid\theta)}[\log p(\bx\mid\bz)]
+- \operatorname{KL}(q(\bZ\mid\theta)\,\Vert\,p(\bZ)).
+\]
+As in the earlier tasks, the expectation is approximated with a single
+reparameterised Monte Carlo sample
+$\bz = \bmu_\theta + \bsigma_\theta \odot \bm{\epsilon}$,
+$\bm{\epsilon} \sim \mathcal{N}(\mathbf{0},I)$.  Since we use the Bernoulli model,
+the likelihood term is the negative cross-entropy between the grayscale image
+and the decoder Bernoulli probabilities.  We optimise each image independently
+with Adam, stopping when the best single-sample objective has not improved for
+the chosen patience window.
+
+\begin{lstlisting}[caption={Optimising a free posterior for one image (\texttt{vae/inference\_without\_encoder.py}).}]
+mean = nn.Parameter(torch.zeros(1, model.latent_dim, device=device))
+logvar = nn.Parameter(torch.zeros(1, model.latent_dim, device=device))
+z = mean + torch.exp(0.5 * logvar) * torch.randn_like(mean)
+logits = model.decode(z)
+q = GaussianParams(mean=mean, logvar=logvar)
+elbo = _bernoulli_reconstruction_term(x, logits, mask=None) - kl_to_standard_normal(q)
+\end{lstlisting}
+
+Figure~\ref{fig:task4a} compares, row by row, the original test image, the
+reconstruction obtained from the optimised $q(\bZ\mid\theta^\star)$, and the
+ordinary encoder-based reconstruction from Task~1d.  The encoder-free method
+usually finds a plausible latent code, but it is slower because a separate
+optimisation problem has to be solved for every image.  This is precisely why
+the encoder is useful: after training, it amortises inference into one forward
+pass.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\textwidth]{outputs/task4a_reconstruction_without_encoder.png}
+    \caption{Task 4a -- reconstruction without using the encoder.  Each row
+    shows the original image, the reconstruction from an independently optimised
+    variational posterior $q(\bZ\mid\theta^\star)$, and the corresponding
+    encoder-based reconstruction.}
+    \label{fig:task4a}
+\end{figure}
+
+\section*{Task 4b --- Image Completion}
+\addcontentsline{toc}{section}{Task 4b --- Image Completion}
+
+For image completion we only condition on the left half $\bx_L$ of the image and
+treat the right half $\bx_R$ as missing.  The optimisation is therefore the same
+as in Task~4a except that the reconstruction term is evaluated only on the
+observed pixels:
+\[
+\theta^\star
+= \arg\max_\theta
+\mathbb{E}_{q(\bZ\mid\theta)}[\log p(\bx_L\mid\bz)]
+- \operatorname{KL}(q(\bZ\mid\theta)\,\Vert\,p(\bZ)).
+\]
+In code this is implemented by multiplying the per-pixel Bernoulli
+cross-entropy by a binary mask whose left half is one and whose right half is
+zero.  After convergence we sample a latent code from
+$q(\bZ\mid\theta^\star)$, decode it, and keep only the decoded right half while
+copying the true left half from the input.
+
+\begin{lstlisting}[caption={Masking out the missing right half for Task 4b.}]
+left_mask = torch.zeros(1, 1, 28, 28, device=device)
+left_mask[:, :, :, :14] = 1.0
+neg_ce = -F.binary_cross_entropy_with_logits(logits, x, reduction="none")
+observed_log_likelihood = (neg_ce * left_mask).flatten(start_dim=1).sum(dim=1)
+completed = x * left_mask + torch.sigmoid(logits) * (1.0 - left_mask)
+\end{lstlisting}
+
+Figure~\ref{fig:task4b} shows the completion task.  Each row contains the true
+test image, the observed image with its right half removed, and the completed
+image produced by optimising only against the visible left half.  The generated
+right halves are not exact copies of the ground truth, because many right halves
+can be compatible with the same left half, but they should be plausible samples
+under the learned digit manifold.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\textwidth]{outputs/task4b_completion_without_encoder.png}
+    \caption{Task 4b -- image completion without using the encoder.  Each row
+    shows the original image, the observed left half with the missing right half
+    blacked out, and the completed image whose right half is decoded after
+    optimising $q(\bZ\mid\theta)$ against only the observed pixels.}
+    \label{fig:task4b}
+\end{figure}
+
 \end{document}

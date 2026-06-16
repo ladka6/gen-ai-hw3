@@ -1,0 +1,93 @@
+{
+  "task4a": [
+    {
+      "index": 0,
+      "best_elbo": -65.94220733642578,
+      "steps": 367
+    },
+    {
+      "index": 1,
+      "best_elbo": -90.94923400878906,
+      "steps": 406
+    },
+    {
+      "index": 2,
+      "best_elbo": -37.71552658081055,
+      "steps": 169
+    },
+    {
+      "index": 3,
+      "best_elbo": -88.77445983886719,
+      "steps": 338
+    },
+    {
+      "index": 4,
+      "best_elbo": -80.06147766113281,
+      "steps": 260
+    },
+    {
+      "index": 5,
+      "best_elbo": -37.156429290771484,
+      "steps": 399
+    },
+    {
+      "index": 6,
+      "best_elbo": -94.86390686035156,
+      "steps": 243
+    },
+    {
+      "index": 7,
+      "best_elbo": -86.18395233154297,
+      "steps": 448
+    }
+  ],
+  "task4b": [
+    {
+      "index": 0,
+      "best_elbo": -32.81245422363281,
+      "steps": 409
+    },
+    {
+      "index": 1,
+      "best_elbo": -52.27879333496094,
+      "steps": 390
+    },
+    {
+      "index": 2,
+      "best_elbo": -15.005794525146484,
+      "steps": 150
+    },
+    {
+      "index": 3,
+      "best_elbo": -44.57914733886719,
+      "steps": 320
+    },
+    {
+      "index": 4,
+      "best_elbo": -38.28439712524414,
+      "steps": 228
+    },
+    {
+      "index": 5,
+      "best_elbo": -21.391569137573242,
+      "steps": 134
+    },
+    {
+      "index": 6,
+      "best_elbo": -46.17292022705078,
+      "steps": 368
+    },
+    {
+      "index": 7,
+      "best_elbo": -37.54570388793945,
+      "steps": 252
+    }
+  ],
+  "settings": {
+    "num_images": 8,
+    "steps": 800,
+    "learning_rate": 0.05,
+    "patience": 120,
+    "checkpoint": "checkpoints/task2d_bernoulli.pt"
+  }
+}
