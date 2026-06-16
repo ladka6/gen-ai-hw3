@@ -679,4 +679,144 @@ to the Bernoulli model used here.  Unlike the standard Bernoulli cross-entropy
 objective, the Continuous Bernoulli adds a normalisation term that accounts for the
 fact that the data are continuous, leading to a proper probability density on $[0,1]$.
 
+\clearpage
+%% ===========================================================================
+\section{Task 3 --- Investigating the Latent Space}
+%% ===========================================================================
+
+For Task~3 we investigate the structure that the latent variables $\bZ$ capture.
+Following the freedom granted by the assignment, we use our preferred model from
+Task~2: the \textbf{Bernoulli} VAE (Task~2d), which we argued in Task~2e is the
+most appropriate choice for the near-binary MNIST data. The three sub-tasks all
+operate on the \emph{trained encoder}, evaluating the posterior mean
+$\bmu(\bx)$ of test images. The code lives in \texttt{vae/latent.py}, driven by
+the entry points \texttt{task3a.py}, \texttt{task3b.py} and \texttt{task3c.py}.
+All encoder evaluations are wrapped in \texttt{torch.no\_grad()}.
+
+\begin{lstlisting}[caption={Evaluating the trained encoder on the first 1000 test images (\texttt{vae/latent.py}).}]
+@torch.no_grad()
+def encode_means(model, test_set, device, num_points=1000):
+    images = torch.stack([test_set[i][0] for i in range(num_points)]).to(device)
+    labels = torch.tensor([test_set[i][1] for i in range(num_points)])
+    means = model.encode(images).mean          # mu(x_i), shape (num_points, K)
+    return means.cpu(), labels
+\end{lstlisting}
+
+\section*{Task 3a --- Visualising a 2-D Latent Space}
+\addcontentsline{toc}{section}{Task 3a --- Visualising a 2-D Latent Space}
+
+We retrain the Bernoulli VAE from scratch with a two-dimensional latent space
+$\mathcal{Z} = \mathbb{R}^2$ (i.e.\ $K=2$), using exactly the same objective and
+early-stopping criterion as before. Because the latent dimension is the only
+change, no architectural modifications are needed beyond setting
+\texttt{latent\_dim=2}. Training stopped at epoch~$39$ (best validation
+objective $\mathbf{-143.0}$ at epoch~$34$); the lower objective relative to the
+$K=16$ model (Task~2d) is expected, since a 2-D bottleneck is far more
+restrictive.
+
+We then evaluate the trained encoder on the first $1000$ test images and plot
+their latent means $\bmu(\bx_i)$ directly, using a distinct colour for each of
+the ten digit classes (Figure~\ref{fig:latent2d}). Even though the model was
+trained \emph{without} any access to the labels, the classes form clearly
+separated clusters: the digit~$1$ occupies its own region (top-left), the
+digit~$0$ another (right), and visually similar digits (e.g.\ $4$/$9$ and
+$3$/$5$/$8$) sit adjacent to one another. This shows that the unsupervised ELBO
+objective recovers the class structure that is only implicitly present in the
+data.
+
+\begin{lstlisting}[caption={Scatter of the 2-D latent means, colour-coded by class (\texttt{vae/latent.py}).}]
+means, labels = encode_means(model, test_set, device, num_points)  # K == 2
+for digit in range(10):
+    mask = labels == digit
+    ax.scatter(means[mask, 0], means[mask, 1], color=cmap(digit), label=str(digit))
+\end{lstlisting}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.7\textwidth]{outputs/task3a_latent_scatter.png}
+    \caption{Task 3a -- latent means $\bmu(\bx_i)$ of the first $1000$ test
+    images for the $K=2$ Bernoulli VAE, colour-coded by digit class. The
+    classes separate into distinct clusters despite the fully unsupervised
+    training objective.}
+    \label{fig:latent2d}
+\end{figure}
+
+\section*{Task 3b --- Visualising the Latent Space with PCA}
+\addcontentsline{toc}{section}{Task 3b --- Visualising the Latent Space with PCA}
+
+A 2-D latent space is convenient to plot but limits the model's capacity. To
+visualise a higher-dimensional space we reuse the $K=16$ Bernoulli VAE already
+trained to completion in Task~2d (which satisfies $K \ge 10$). We evaluate its
+encoder on the first $1000$ test images and stack the latent means into a matrix
+$\mathbf{U} \in \mathbb{R}^{1000 \times 16}$ (one row per image), then project
+the rows onto their first two principal components with
+\texttt{scikit-learn}'s \texttt{PCA}.
+
+\begin{lstlisting}[caption={PCA projection of the K-dimensional latent means (\texttt{vae/latent.py}).}]
+from sklearn.decomposition import PCA
+
+means, labels = encode_means(model, test_set, device, num_points)  # U: 1000 x 16
+pca = PCA(n_components=2)
+projected = pca.fit_transform(means.numpy())   # rows projected onto PC1, PC2
+\end{lstlisting}
+
+Figure~\ref{fig:latentpca} shows the projection, again colour-coded by class.
+The first two principal components capture only $10.9\%$ and $9.0\%$ of the
+variance respectively, so a large amount of the $16$-dimensional structure is
+necessarily lost in this 2-D view. Nonetheless the classes are still partially
+organised --- for example the digit~$1$ separates cleanly --- confirming that
+the higher-dimensional latent space also encodes class identity, just spread
+across more directions than two principal components can display.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.7\textwidth]{outputs/task3b_latent_pca.png}
+    \caption{Task 3b -- the $16$-D latent means of the first $1000$ test images,
+    projected onto their first two principal components and colour-coded by
+    digit class. The percentages give the variance explained by each component.}
+    \label{fig:latentpca}
+\end{figure}
+
+\section*{Task 3c --- Interpolation in the Latent Space}
+\addcontentsline{toc}{section}{Task 3c --- Interpolation in the Latent Space}
+
+Finally we perform operations \emph{in} the latent space and decode the result.
+Using the $K=16$ Bernoulli model, for each row of the figure we take two test
+images $\bx$ and $\bx'$ with \emph{different} class labels, draw latent samples
+$\bz \sim q(\bZ \mid \bx)$ and $\bz' \sim q(\bZ \mid \bx')$ via the
+reparameterisation trick, and form the linear interpolation
+\[
+\bz_\lambda = \lambda\,\bz + (1-\lambda)\,\bz', \qquad \lambda \in [0,1],
+\]
+for a uniform partition of $[0,1]$ into $k=8$ steps. Each $\bz_\lambda$ is
+decoded to its posterior-mean image $\pi_d(\bz_\lambda) = \sigma(\mathrm{logit}_d)$.
+
+\begin{lstlisting}[caption={Latent-space interpolation between two test images (\texttt{vae/latent.py}).}]
+lambdas = torch.linspace(1.0, 0.0, num_interp, device=device)  # lam=1 -> x, lam=0 -> x'
+z = model.reparameterise(model.encode(x))            # z  ~ q(Z|x)
+z_prime = model.reparameterise(model.encode(x_prime))  # z' ~ q(Z|x')
+z_lambda = lambdas.view(-1, 1) * z + (1.0 - lambdas).view(-1, 1) * z_prime
+interp_images = torch.sigmoid(model.decode(z_lambda))  # posterior-mean images
+\end{lstlisting}
+
+The resulting grid (Figure~\ref{fig:interp}) places the original image $\bx$ in
+the leftmost column, $\bx'$ in the rightmost column, and the $k=8$ decoded
+interpolations in between, sweeping from $\lambda=1$ (next to $\bx$) to
+$\lambda=0$ (next to $\bx'$). The transitions are smooth and traverse
+\emph{plausible} digit shapes throughout --- e.g.\ a $7$ gradually morphs into a
+$2$, and a $4$ into a $9$ --- rather than producing meaningless blends. This
+indicates that the latent space is well-structured: straight lines between
+encoded points stay on the data manifold.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{outputs/task3c_interpolation.png}
+    \caption{Task 3c -- latent-space interpolations for the $K=16$ Bernoulli VAE.
+    Each row interpolates between two test images of different classes: the
+    leftmost column is $\bx$, the rightmost is $\bx'$, and the eight columns in
+    between are the decoded codes $\bz_\lambda = \lambda\bz + (1-\lambda)\bz'$
+    for $\lambda$ decreasing from $1$ to $0$.}
+    \label{fig:interp}
+\end{figure}
+
 \end{document}
